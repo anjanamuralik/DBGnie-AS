@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>DBGnie</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.1.3/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.5.0/css/all.css">
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+</head>
+
+<body>
+    <div class="container-fluid h-100">
+        <div class="row justify-content-center h-100">
+            <div class="col-md-8 col-xl-6 chat">
+                <div class="card">
+                    <div class="card-header msg_head">
+                        <div class="d-flex bd-highlight">
+                            <div class="img_cont">
+                                <img src="{{ url_for('static', filename='bot-icon.png') }}" class="rounded-circle user_img">
+                                <span class="online_icon"></span>
+                            </div>
+                            <div class="user_info">
+                                <span>DBGnie</span>
+                                <p>Ask me to generate Oracle SQL queries!</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="messageFormeight" class="card-body msg_card_body">
+                        <!-- Welcome Message -->
+                        <div class="d-flex justify-content-start mb-4">
+                            <div class="img_cont_msg">
+                                <img src="{{ url_for('static', filename='bot-icon.png') }}" class="rounded-circle user_img_msg">
+                            </div>
+                            <div class="msg_cotainer">
+                                Welcome! How can I help you with Oracle SQL queries today?
+                                <span class="msg_time">Now</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card-footer">
+                        <form id="messageArea" class="input-group">
+                            <input type="text" id="text" name="msg" placeholder="Ask for SQL queries..." 
+                                   autocomplete="off" class="form-control type_msg" required />
+                            <div class="input-group-append">
+                                <button type="submit" id="send" class="input-group-text send_btn">
+                                    <i class="fas fa-location-arrow"></i>
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add JavaScript file reference -->
+    <script src="{{ url_for('static', filename='chat.js') }}"></script>
+</body>
+</html>
