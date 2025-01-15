@@ -1,120 +1,153 @@
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, jsonify
+import cx_Oracle
 import os
 from dotenv import load_dotenv
-from qdrant_client import QdrantClient
-from transformers import AutoTokenizer, AutoModel
-from langchain.prompts.chat import (
-    ChatPromptTemplate,
-    SystemMessagePromptTemplate,
-    HumanMessagePromptTemplate,
+from query_generator import generate_query
+from query_generator import (
+    generate_query,
+    generate_sql_from_metadata,
+    clean_sql_query,
+    vector_search,
+    generate_embeddings,
+    analyze_query_results,  # Add this import
+    llm,
+    qdrant_client,
+    qdrant_collection
 )
-from langchain_core.output_parsers import StrOutputParser
-from langchain_openai import AzureChatOpenAI
-import torch
 
 app = Flask(__name__)
 
 # Load environment variables
 load_dotenv()
-qdrant_host = os.getenv('QDRANT_HOST', '192.168.1.36')
-qdrant_port = int(os.getenv('QDRANT_PORT', 6333))
-qdrant_collection = os.getenv('QDRANT_COLLECTION', 'Master_Metadata')
-qdrant_client = QdrantClient(host=qdrant_host, port=qdrant_port)
 
-# Initialize embedding model (BGE-small)
-tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-small-en")
-model = AutoModel.from_pretrained("BAAI/bge-small-en")
+# Database configuration
+DB_CONFIG = {
+    'TEST': {
+        'host': os.getenv('TEST_DB_HOST', '192.168.1.50'),
+        'port': int(os.getenv('TEST_DB_PORT', '1531')),
+        'service_name': os.getenv('TEST_DB_SERVICE', 'TEST'),
+        'username': os.getenv('TEST_DB_USER', 'test_user'),
+        'password': os.getenv('TEST_DB_PASSWORD', 'test_password')
+    },
+    'R13': {
+        'host': os.getenv('R13_DB_HOST', '192.168.1.225'),
+        'port': int(os.getenv('R13_DB_PORT', '1521')),
+        'service_name': os.getenv('R13_DB_SERVICE', 'VIS'),
+        'username': os.getenv('R13_DB_USER', 'r13_user'),
+        'password': os.getenv('R13_DB_PASSWORD', 'r13_password')
+    },
+    'R26': {
+        'host': os.getenv('R26_DB_HOST', 'localhost'),
+        'port': int(os.getenv('R26_DB_PORT', '1521')),
+        'service_name': os.getenv('R26_DB_SERVICE', 'r26'),
+        'username': os.getenv('R26_DB_USER', 'r26_user'),
+        'password': os.getenv('R26_DB_PASSWORD', 'r26_password')
+    },
+    'DEMO': {
+        'host': os.getenv('DEMO_DB_HOST', 'localhost'),
+        'port': int(os.getenv('DEMO_DB_PORT', '1521')),
+        'service_name': os.getenv('DEMO_DB_SERVICE', 'demo'),
+        'username': os.getenv('DEMO_DB_USER', 'demo_user'),
+        'password': os.getenv('DEMO_DB_PASSWORD', 'demo_password')
+    }
+}
 
-# Initialize Azure OpenAI LLM
-llm = AzureChatOpenAI(
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    openai_api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-    azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
-    openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
-    temperature=0.1,
-    max_tokens=400
-)
 
-# Function to generate embeddings using the BGE model
-def generate_embeddings(text):
-    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
-    with torch.no_grad():
-        outputs = model(**inputs).last_hidden_state.mean(dim=1)
-    return outputs.numpy().flatten()
+def execute_query(query, database):
+    try:
+        config = DB_CONFIG.get(database)
+        if not config:
+            return {
+                "error": f"Unknown database: {database}",
+                "solution": "Please select a valid database"
+            }
 
-# Perform Qdrant search
-def vector_search(query, collection_name, limit=5):
-    """Search Qdrant for multiple relevant tables."""
-    embeddings = generate_embeddings(query)
-    results = qdrant_client.search(
-        collection_name=collection_name,
-        query_vector=embeddings.tolist(),
-        limit=limit  # Fetch multiple relevant matches
-    )
-    return [result.payload for result in results] if results else []
+        dsn = cx_Oracle.makedsn(
+            config['host'],
+            config['port'],
+            service_name=config['service_name']
+        )
 
-def generate_sql_from_metadata(user_query, table_metadata_list):
-    if not table_metadata_list:
-        return "No metadata found to generate the SQL query."
+        print(f"Connecting to database: {database}")
+        print(f"DSN: {dsn}")
 
-    # Combine metadata from multiple tables
-    combined_metadata = ""
-    for table_metadata in table_metadata_list:
-        table_name = table_metadata.get("table_name", "UNKNOWN_TABLE")
-        columns = table_metadata.get("columns", [])
-        columns_list = "\n".join([
-            f"{col['column_name']} ({col['data_type']}): {col['description']}."
-            for col in columns
-        ])
-        relationships = table_metadata.get("relationships", [])
-        relationship_list = "\n".join([
-            f"Related Table: {rel['related_table']}, Conditions: {' AND '.join(rel['on_conditions'])}"
-            for rel in relationships
-        ])
-        business_logic = table_metadata.get("business_logic", {})
-        business_logic_text = "\n".join([
-            f"{key}: {value}" for key, value in business_logic.items()
-        ])
-        combined_metadata += f"Table: {table_name}\nColumns:\n{columns_list}\nRelationships:\n{relationship_list}\nBusiness Logic:\n{business_logic_text}\n\n"
+        connection = cx_Oracle.connect(
+            user=config['username'],
+            password=config['password'],
+            dsn=dsn
+        )
 
-    # Prompt template with combined metadata
-    prompt_template = f"""
-    You are an expert Oracle SQL query generator. DO NOT PERFORM INTERNET SEARCH IF NOT IN THE METADATA
-    Given the user query, metadata of multiple related tables, and their relationships, generate a precise SQL query.
-    - Use standard Oracle SQL syntax
-    - Join tables based on their defined relationships
-    - Ensure to include all necessary conditions and filters relevant to the user query
-    - Optimize the query for performance
-    - If calculating size or usage, convert sizes from BYTES to GIGABYTES (GB) by dividing BYTES by 1024 * 1024 * 1024
-    - Prioritize tables and columns mentioned in the user query if available
+        cursor = connection.cursor()
+        print(f"Executing query: {query}")
+        cursor.execute(query)
+        
+        if query.strip().upper().startswith('SELECT'):
+            columns = [col[0] for col in cursor.description]
+            results = cursor.fetchall()
+            
+            result_table = []
+            for row in results:
+                result_row = {}
+                for idx, col in enumerate(columns):
+                    result_row[col] = str(row[idx])
+                result_table.append(result_row)
+            
+            cursor.close()
+            connection.close()
+            return {"success": True, "data": result_table}
+        
+        connection.commit()
+        cursor.close()
+        connection.close()
+        return {"success": True, "message": "Query executed successfully."}
+                
+    except cx_Oracle.Error as e:
+        error_obj = e.args[0]
+        print(f"Oracle Error: {error_obj.code} - {error_obj.message}")
+        return {
+            "error": f"Oracle Error [{error_obj.code}]: {error_obj.message}",
+            "solution": "Please check your database connection and query."
+        }
+    except Exception as e:
+        print(f"General Error: {str(e)}")
+        return {
+            "error": f"Error: {str(e)}",
+            "solution": "An unexpected error occurred."
+        }
 
-    Available Tables, Columns, Relationships, and Business Logic:
-    {combined_metadata}
+def process_query(user_query, database):
+    try:
+        print(f"Processing query for database: {database}")
+        
+        generated_query, error = generate_query(user_query)
+        if error:
+            return {
+                "error": error,
+                "solution": "Try rephrasing your question."
+            }
+        
+        execution_result = execute_query(generated_query, database)
+        print(f"Execution result: {execution_result}")
+        
+        # Generate summary if we have data
+        summary = None
+        if execution_result.get("success") and "data" in execution_result:
+            summary = analyze_query_results(generated_query, execution_result["data"])
+            print(f"Generated summary: {summary}")  # Debug print
 
-    User Query: {user_query}
-    SQL Query:
-    """
-    
-    # Use the LLM to generate the query
-    chain = (ChatPromptTemplate.from_messages([
-        SystemMessagePromptTemplate.from_template(prompt_template),
-        HumanMessagePromptTemplate.from_template(user_query),
-    ]) | llm | StrOutputParser())
-    
-    query_result = chain.invoke({})
-    return query_result
+        return {
+            "query": generated_query,
+            "result": execution_result,
+            "summary": summary
+        }
+        
+    except Exception as e:
+        print(f"Process query error: {str(e)}")
+        return {
+            "error": str(e),
+            "solution": "An error occurred while processing your query."
+        }
 
-def process_query(user_query):
-    # Perform semantic search in Qdrant
-    print(f"Performing Qdrant semantic search for: {user_query}")
-    relevant_tables = vector_search(user_query, qdrant_collection, limit=5)  # Fetch multiple relevant tables
-    
-    if relevant_tables:
-        # Generate SQL query based on combined metadata
-        return generate_sql_from_metadata(user_query, relevant_tables)
-    return "No relevant table metadata found for generating the SQL query."
-
-# Flask routes
 @app.route('/')
 def home():
     return render_template('index.html')
@@ -122,12 +155,14 @@ def home():
 @app.route('/get', methods=['POST'])
 def get_bot_response():
     user_message = request.form['msg']
-    try:
-        response = process_query(user_message)
-        return response
-    except Exception as e:
-        print(f"Error processing query: {str(e)}")  # Log the error
-        return f"Error: {str(e)}"
+    selected_db = request.form.get('database', 'TEST')
+    
+    print(f"Received request - Message: {user_message}, Database: {selected_db}")
+    
+    response = process_query(user_message, selected_db)
+    return jsonify(response)
+
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
+
